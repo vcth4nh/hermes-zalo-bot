@@ -1,0 +1,59 @@
+name: zalo
+label: Zalo Bot
+kind: platform
+version: 0.1.0
+description: >
+  Official Zalo Bot API gateway adapter for Hermes Agent. Long polling (default) or webhook,
+  direct messages and groups, text both ways, inbound photos.
+author: vcth4nh
+requires_env:
+  - name: ZALO_BOT_TOKEN
+    description: "Bot token from Zalo Bot Creator (format numeric_id:secret)"
+    prompt: "Zalo bot token"
+    url: "https://bot.zapps.me/docs/create-bot/"
+    password: true
+optional_env:
+  - name: ZALO_MODE
+    description: "Receive mode: polling (default) or webhook"
+    prompt: "Receive mode (polling/webhook)"
+    password: false
+  - name: ZALO_POLL_TIMEOUT
+    description: "getUpdates long-poll timeout in seconds (default 30)"
+    prompt: "Poll timeout seconds"
+    password: false
+  - name: ZALO_WEBHOOK_URL
+    description: "Public HTTPS URL Zalo calls in webhook mode, path included"
+    prompt: "Webhook URL"
+    password: false
+  - name: ZALO_WEBHOOK_SECRET
+    description: "Secret (8-256 chars) Zalo echoes in the X-Bot-Api-Secret-Token header"
+    prompt: "Webhook secret"
+    password: true
+  - name: ZALO_WEBHOOK_HOST
+    description: "Local bind address for the webhook server (default 127.0.0.1)"
+    prompt: "Webhook bind host"
+    password: false
+  - name: ZALO_WEBHOOK_PORT
+    description: "Local bind port for the webhook server (default 8790)"
+    prompt: "Webhook bind port"
+    password: false
+  - name: ZALO_ALLOWED_USERS
+    description: "Comma-separated Zalo user IDs allowed to talk to the bot"
+    prompt: "Allowed user IDs (comma-separated)"
+    password: false
+  - name: ZALO_ALLOW_ALL_USERS
+    description: "Allow any Zalo user to trigger the bot (dev only)"
+    prompt: "Allow all users? (true/false)"
+    password: false
+  - name: ZALO_ALLOWED_GROUPS
+    description: "Comma-separated Zalo group chat IDs the bot answers in (empty = any group)"
+    prompt: "Allowed group IDs (comma-separated)"
+    password: false
+  - name: ZALO_HOME_CHANNEL
+    description: "Default chat ID for cron / notification delivery"
+    prompt: "Home chat ID"
+    password: false
+  - name: ZALO_HOME_CHANNEL_NAME
+    description: "Display name for the home chat"
+    prompt: "Home chat display name"
+    password: false
