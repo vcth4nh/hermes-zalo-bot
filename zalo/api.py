@@ -109,3 +109,109 @@ def parse_update(payload: Any) -> Optional[ZaloUpdate]:
         date_ms=int(date) if isinstance(date, (int, float)) and not isinstance(date, bool) else None,
         raw=payload,
     )
+
+
+try:
+    import httpx
+except ImportError:  # pragma: no cover - httpx is a Hermes core dependency
+    httpx = None  # type: ignore[assignment]
+
+
+class ZaloApiError(Exception):
+    """A Zalo API call failed. ``code`` is Zalo's ``error_code``, else the HTTP status, else 0."""
+
+    def __init__(self, method: str, code: int, description: str):
+        self.method = method
+        self.code = code
+        self.description = description
+        super().__init__(f"Zalo {method} failed ({code}): {description}")
+
+
+class ZaloBotApi:
+    """Async client for ``https://bot-api.zaloplatforms.com/bot<TOKEN>/<method>``.
+
+    ``client`` is injectable for tests: ``httpx.AsyncClient(transport=httpx.MockTransport(...))``.
+    httpx is required (not aiohttp): Zalo's edge sends duplicate ``Server`` headers, which
+    aiohttp's strict client parser rejects.
+    """
+
+    def __init__(self, token: str, *, client: Optional["httpx.AsyncClient"] = None, timeout: float = 35.0):
+        if httpx is None:
+            raise RuntimeError("httpx is required for the Zalo adapter")
+        self._token = token
+        self._timeout = timeout
+        self._client = client or httpx.AsyncClient(timeout=timeout)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    def url(self, method: str) -> str:
+        return f"{API_BASE}/bot{self._token}/{method}"
+
+    def _redact(self, text: str) -> str:
+        return redact_token(text, self._token)
+
+    async def call(self, method: str, params: Optional[dict] = None, *, read_timeout: Optional[float] = None) -> Any:
+        """POST ``params`` as JSON and return the ``result`` field. Raises ``ZaloApiError`` on failure."""
+        try:
+            response = await self._client.post(self.url(method), json=params or {}, timeout=read_timeout or self._timeout)
+        except httpx.TimeoutException as exc:
+            raise ZaloApiError(method, 408, "request timeout") from exc
+        except httpx.HTTPError as exc:
+            raise ZaloApiError(method, 0, self._redact(str(exc))) from exc
+        try:
+            payload = response.json()
+        except ValueError:
+            raise ZaloApiError(method, response.status_code, self._redact(response.text[:200])) from None
+        if not isinstance(payload, dict) or not payload.get("ok"):
+            code = payload.get("error_code") if isinstance(payload, dict) else None
+            description = payload.get("description") if isinstance(payload, dict) else None
+            raise ZaloApiError(method, int(code or response.status_code or 0), self._redact(str(description or payload)[:200]))
+        return payload.get("result")
+
+    async def get_me(self) -> dict:
+        result = await self.call("getMe")
+        return result if isinstance(result, dict) else {}
+
+    async def get_updates(self, timeout: int = 30) -> Optional[ZaloUpdate]:
+        """Long-poll once. Returns the single update, or ``None`` when there is none (empty result or 408)."""
+        try:
+            result = await self.call("getUpdates", {"timeout": timeout}, read_timeout=timeout + 10)
+        except ZaloApiError as exc:
+            if exc.code == 408:
+                return None
+            raise
+        return parse_update(result) if isinstance(result, dict) else None
+
+    async def send_message(self, chat_id: str, text: str, parse_mode: Optional[str] = None) -> str:
+        params: dict = {"chat_id": str(chat_id), "text": text}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        result = await self.call("sendMessage", params)
+        return str(result.get("message_id") or "") if isinstance(result, dict) else ""
+
+    async def send_photo(self, chat_id: str, photo_url: str, caption: Optional[str] = None) -> str:
+        params: dict = {"chat_id": str(chat_id), "photo": photo_url}
+        if caption:
+            params["caption"] = caption[:TEXT_LIMIT]
+        result = await self.call("sendPhoto", params)
+        return str(result.get("message_id") or "") if isinstance(result, dict) else ""
+
+    async def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        await self.call("sendChatAction", {"chat_id": str(chat_id), "action": action})
+
+    async def get_webhook_info(self) -> Optional[dict]:
+        """The current webhook, or ``None`` when Zalo answers 404 (no webhook set)."""
+        try:
+            result = await self.call("getWebhookInfo")
+        except ZaloApiError as exc:
+            if exc.code == 404:
+                return None
+            raise
+        return result if isinstance(result, dict) else None
+
+    async def set_webhook(self, url: str, secret_token: str) -> None:
+        await self.call("setWebhook", {"url": url, "secret_token": secret_token})
+
+    async def delete_webhook(self) -> None:
+        await self.call("deleteWebhook")

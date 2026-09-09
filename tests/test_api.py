@@ -115,3 +115,157 @@ def test_parse_update_coerces_ids_and_falls_back_user_name_to_id():
 ])
 def test_parse_update_rejects_payloads_without_a_chat(payload):
     assert parse_update(payload) is None
+
+
+# -- ZaloBotApi client ------------------------------------------------------
+
+from zalo.api import ZaloApiError, ZaloBotApi  # noqa: E402
+
+
+def _run(coro):
+    return asyncio.run(coro)
+
+
+class Recorder:
+    """httpx.MockTransport handler: records requests, replies from a script."""
+
+    def __init__(self, *responses):
+        self.responses = list(responses)
+        self.requests = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.requests.append(request)
+        if not self.responses:
+            return httpx.Response(200, json={"ok": True, "result": {}})
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+def _api(recorder: Recorder, token: str = TOKEN) -> ZaloBotApi:
+    return ZaloBotApi(token, client=httpx.AsyncClient(transport=httpx.MockTransport(recorder)))
+
+
+def ok(result=None) -> httpx.Response:
+    return httpx.Response(200, json={"ok": True, "result": {} if result is None else result, "error_code": 0})
+
+
+def err(code: int, description: str = "bad", status: int = 200) -> httpx.Response:
+    return httpx.Response(status, json={"ok": False, "error_code": code, "description": description})
+
+
+def _body(request: httpx.Request) -> dict:
+    return json.loads(request.content)
+
+
+def test_url_embeds_token_and_method():
+    assert _api(Recorder()).url("getMe") == f"{API_BASE}/bot{TOKEN}/getMe"
+
+
+def test_call_posts_json_and_returns_result():
+    rec = Recorder(ok({"id": "42"}))
+    assert _run(_api(rec).call("getMe")) == {"id": "42"}
+    req = rec.requests[0]
+    assert req.method == "POST"
+    assert req.url.path == f"/bot{TOKEN}/getMe"
+    assert req.headers["content-type"] == "application/json"
+    assert _body(req) == {}
+
+
+def test_call_raises_with_zalo_error_code():
+    with pytest.raises(ZaloApiError) as info:
+        _run(_api(Recorder(err(401, "Unauthorized"))).call("getMe"))
+    assert info.value.code == 401
+    assert info.value.method == "getMe"
+    assert "Unauthorized" in str(info.value)
+
+
+def test_call_raises_on_non_json_http_error():
+    with pytest.raises(ZaloApiError) as info:
+        _run(_api(Recorder(httpx.Response(502, text="<html>bad gateway</html>"))).call("getMe"))
+    assert info.value.code == 502
+
+
+def test_call_maps_timeout_to_408_and_transport_errors_to_0():
+    with pytest.raises(ZaloApiError) as timeout:
+        _run(_api(Recorder(httpx.ReadTimeout("slow"))).call("getMe"))
+    with pytest.raises(ZaloApiError) as transport:
+        _run(_api(Recorder(httpx.ConnectError("refused"))).call("getMe"))
+    assert timeout.value.code == 408
+    assert transport.value.code == 0
+
+
+def test_call_redacts_token_from_errors():
+    with pytest.raises(ZaloApiError) as info:
+        _run(_api(Recorder(err(400, f"bad url https://x/bot{TOKEN}/getMe"))).call("getMe"))
+    assert TOKEN not in str(info.value)
+    assert "<TOKEN>" in str(info.value)
+
+
+def test_get_me_returns_result_dict():
+    assert _run(_api(Recorder(ok({"id": "42", "display_name": "Bot"}))).get_me()) == {"id": "42", "display_name": "Bot"}
+
+
+def test_get_updates_sends_timeout_and_parses_update():
+    rec = Recorder(ok({
+        "event_name": EVENT_TEXT,
+        "message": {"message_id": "m1", "text": "hi", "from": {"id": "u"}, "chat": {"id": "u", "chat_type": "PRIVATE"}},
+    }))
+    update = _run(_api(rec).get_updates(timeout=25))
+    assert update is not None and update.text == "hi" and update.message_id == "m1"
+    assert _body(rec.requests[0]) == {"timeout": 25}
+
+
+def test_get_updates_returns_none_on_408_and_on_empty_result():
+    assert _run(_api(Recorder(err(408, "timeout"))).get_updates()) is None
+    assert _run(_api(Recorder(ok({}))).get_updates()) is None
+
+
+def test_get_updates_propagates_other_errors():
+    with pytest.raises(ZaloApiError):
+        _run(_api(Recorder(err(401))).get_updates())
+
+
+def test_send_message_params_and_message_id():
+    rec = Recorder(ok({"message_id": "abc", "date": 1}), ok({"message_id": "def"}))
+    api = _api(rec)
+    assert _run(api.send_message("c1", "hello", parse_mode="markdown")) == "abc"
+    assert _run(api.send_message("c1", "plain")) == "def"
+    assert _body(rec.requests[0]) == {"chat_id": "c1", "text": "hello", "parse_mode": "markdown"}
+    assert _body(rec.requests[1]) == {"chat_id": "c1", "text": "plain"}
+
+
+def test_send_photo_and_chat_action_params():
+    rec = Recorder(ok({"message_id": "p1"}), httpx.Response(200, json={"ok": True}))
+    api = _api(rec)
+    assert _run(api.send_photo("c1", "https://cdn/x.jpg", caption="cap")) == "p1"
+    _run(api.send_chat_action("c1"))
+    assert _body(rec.requests[0]) == {"chat_id": "c1", "photo": "https://cdn/x.jpg", "caption": "cap"}
+    assert _body(rec.requests[1]) == {"chat_id": "c1", "action": "typing"}
+
+
+def test_webhook_methods():
+    rec = Recorder(
+        ok({"url": "https://h/x"}), err(404, "Not Found"),
+        httpx.Response(200, json={"ok": True}), httpx.Response(200, json={"ok": True}),
+    )
+    api = _api(rec)
+    assert _run(api.get_webhook_info()) == {"url": "https://h/x"}
+    assert _run(api.get_webhook_info()) is None
+    _run(api.set_webhook("https://h/x", "s3cr3t-token"))
+    _run(api.delete_webhook())
+    assert _body(rec.requests[2]) == {"url": "https://h/x", "secret_token": "s3cr3t-token"}
+    assert rec.requests[3].url.path.endswith("/deleteWebhook")
+
+
+def test_close_closes_client():
+    class Closing(httpx.AsyncClient):
+        closed = False
+
+        async def aclose(self):
+            self.closed = True
+
+    client = Closing(transport=httpx.MockTransport(Recorder()))
+    _run(ZaloBotApi(TOKEN, client=client).close())
+    assert client.closed
