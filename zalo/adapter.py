@@ -12,11 +12,14 @@ from typing import Any, Dict, Optional, Set
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret
-from gateway.platforms.base import BasePlatformAdapter, SendResult
+from gateway.platforms.base import BasePlatformAdapter, SendResult, cache_image_from_url
 from gateway.platforms.event import MessageEvent, MessageType
 
-from .api import TEXT_LIMIT, ZaloApiError, ZaloBotApi, ZaloUpdate, chunk_text, redact_token
-from .inbound import SeenIds
+from .api import (
+    EVENT_IMAGE, EVENT_STICKER, EVENT_TEXT, EVENT_VOICE, TEXT_LIMIT,
+    ZaloApiError, ZaloBotApi, ZaloUpdate, chunk_text, redact_token,
+)
+from .inbound import SeenIds, strip_mention
 
 try:
     import httpx  # noqa: F401
@@ -49,6 +52,11 @@ PLATFORM_HINT = (
     "You are chatting via Zalo Bot. Each message is capped at 2000 characters and supports basic "
     "markdown only, so keep replies concise. Images can be sent only as public URLs."
 )
+
+PLACEHOLDER_STICKER = "[sticker]"
+PLACEHOLDER_VOICE = "[voice message — Zalo voice is not supported here, please send text]"
+PLACEHOLDER_UNSUPPORTED = "[Zalo could not deliver this message — please resend it as plain text]"
+PLACEHOLDER_PHOTO_FAILED = "[Zalo photo could not be downloaded]"
 
 
 def _setting(extra: Dict[str, Any], key: str, env: str, default: str = "") -> str:
@@ -217,6 +225,61 @@ class ZaloAdapter(BasePlatformAdapter):
             except Exception:
                 pass
             self._api = None
+
+    # -- inbound --------------------------------------------------------------
+
+    async def _handle_update(self, update: ZaloUpdate) -> None:
+        """Dedup, gate groups, normalize the event, and hand it to the Hermes runner."""
+        if update.message_id and not self._seen.add(update.message_id):
+            logger.debug("[%s] duplicate message %s dropped", self.name, update.message_id)
+            return
+        if update.is_group and self._allowed_groups and update.chat_id not in self._allowed_groups:
+            logger.warning("[%s] dropped message from group %s: not in ZALO_ALLOWED_GROUPS", self.name, update.chat_id)
+            return
+        text, message_type, media_paths = await self._event_content(update)
+        chat_type = "group" if update.is_group else "dm"
+        self._chat_types[update.chat_id] = chat_type
+        source = self.build_source(
+            chat_id=update.chat_id,
+            chat_name=update.chat_id if update.is_group else update.user_name,
+            chat_type=chat_type,
+            user_id=update.user_id,
+            user_name=update.user_name,
+            is_bot=update.is_bot,
+            message_id=update.message_id or None,
+        )
+        event = MessageEvent(
+            text=text,
+            message_type=message_type,
+            source=source,
+            raw_message=update.raw,
+            message_id=update.message_id or None,
+            media_urls=media_paths,
+            media_types=["image"] * len(media_paths),
+        )
+        logger.info("[%s] %s from user %s in %s %s", self.name, update.event_name or "message",
+                    update.user_id, chat_type, update.chat_id)
+        await self.handle_message(event)
+
+    async def _event_content(self, update: ZaloUpdate):
+        """Return ``(text, MessageType, media_paths)`` for one update."""
+        if update.event_name == EVENT_TEXT:
+            text = strip_mention(update.text, self._bot_display_name)
+            return text, (MessageType.COMMAND if text.startswith("/") else MessageType.TEXT), []
+        if update.event_name == EVENT_IMAGE:
+            caption = strip_mention(update.text, self._bot_display_name)
+            try:
+                path = await cache_image_from_url(update.photo_url or "")
+            except Exception as exc:
+                logger.warning("[%s] photo download failed: %s", self.name, exc)
+                text = f"{caption}\n{PLACEHOLDER_PHOTO_FAILED}" if caption else PLACEHOLDER_PHOTO_FAILED
+                return text, MessageType.TEXT, []
+            return caption, MessageType.PHOTO, [path]
+        if update.event_name == EVENT_STICKER:
+            return PLACEHOLDER_STICKER, MessageType.STICKER, []
+        if update.event_name == EVENT_VOICE:
+            return PLACEHOLDER_VOICE, MessageType.VOICE, []
+        return PLACEHOLDER_UNSUPPORTED, MessageType.TEXT, []
 
     # -- outbound -------------------------------------------------------------
 

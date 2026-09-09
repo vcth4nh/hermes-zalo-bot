@@ -360,3 +360,100 @@ def test_get_chat_info_defaults_to_dm():
     adapter._chat_types["g1"] = "group"
     assert _run(adapter.get_chat_info("g1")) == {"name": "g1", "type": "group"}
     assert _run(adapter.get_chat_info("u9")) == {"name": "u9", "type": "dm"}
+
+
+# -- inbound dispatch -------------------------------------------------------
+
+def _dispatch(adapter, update):
+    """Run _handle_update and return the captured handle_message mock."""
+    _run(adapter._handle_update(update))
+    return adapter.handle_message
+
+
+def test_handle_update_builds_dm_event():
+    adapter, _ = make_adapter()
+    adapter._bot_display_name = "Bot Mockup"
+    handle = _dispatch(adapter, _update(text="@Bot Mockup hi there"))
+    handle.assert_awaited_once()
+    event = handle.await_args.args[0]
+    assert event.text == "hi there" and event.message_type is MessageType.TEXT
+    assert event.message_id == "m1" and event.raw_message == {"k": "v"}
+    assert event.media_urls == [] and event.media_types == []
+    source = event.source
+    assert (source.chat_id, source.chat_type, source.user_id, source.user_name) == ("u1", "dm", "u1", "Alice")
+    assert source.chat_name == "Alice" and source.platform.value == "zalo"
+
+
+def test_handle_update_group_source_and_chat_info():
+    adapter, _ = make_adapter()
+    event = _dispatch(adapter, _update(chat_id="g1", chat_type="GROUP")).await_args.args[0]
+    assert event.source.chat_type == "group" and event.source.chat_name == "g1" and event.source.user_id == "u1"
+    assert _run(adapter.get_chat_info("g1")) == {"name": "g1", "type": "group"}
+
+
+def test_handle_update_group_allowlist_blocks_other_groups():
+    adapter, _ = make_adapter({"allowed_groups": "g-ok"})
+    _dispatch(adapter, _update(message_id="x1", chat_id="g-bad", chat_type="GROUP"))
+    adapter.handle_message.assert_not_awaited()
+    _dispatch(adapter, _update(message_id="x2", chat_id="g-ok", chat_type="GROUP"))
+    adapter.handle_message.assert_awaited_once()
+
+
+def test_handle_update_group_allowlist_does_not_touch_dms():
+    adapter, _ = make_adapter({"allowed_groups": "g-ok"})
+    _dispatch(adapter, _update())
+    adapter.handle_message.assert_awaited_once()
+
+
+def test_handle_update_dedups_message_ids():
+    adapter, _ = make_adapter()
+    _dispatch(adapter, _update(message_id="same"))
+    _dispatch(adapter, _update(message_id="same"))
+    assert adapter.handle_message.await_count == 1
+
+
+def test_handle_update_command_type():
+    adapter, _ = make_adapter()
+    event = _dispatch(adapter, _update(text="/new")).await_args.args[0]
+    assert event.message_type is MessageType.COMMAND and event.is_command()
+
+
+def test_handle_update_photo_downloads_to_cache(monkeypatch):
+    seen = {}
+
+    async def fake_cache(url):
+        seen["url"] = url
+        return "/cache/img.jpg"
+
+    monkeypatch.setattr(zadapter, "cache_image_from_url", fake_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_IMAGE, text="look", photo_url="https://cdn/a.jpg")
+    event = _dispatch(adapter, update).await_args.args[0]
+    assert seen["url"] == "https://cdn/a.jpg"
+    assert event.message_type is MessageType.PHOTO and event.text == "look"
+    assert event.media_urls == ["/cache/img.jpg"] and event.media_types == ["image"]
+
+
+def test_handle_update_photo_download_failure_becomes_placeholder(monkeypatch):
+    async def fake_cache(url):
+        raise ValueError("blocked")
+
+    monkeypatch.setattr(zadapter, "cache_image_from_url", fake_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_IMAGE, text="", photo_url="https://cdn/a.jpg")
+    event = _dispatch(adapter, update).await_args.args[0]
+    assert event.text == zadapter.PLACEHOLDER_PHOTO_FAILED
+    assert event.media_urls == [] and event.message_type is MessageType.TEXT
+
+
+@pytest.mark.parametrize("event_name, expected_text, expected_type", [
+    (EVENT_STICKER, "PLACEHOLDER_STICKER", MessageType.STICKER),
+    (EVENT_VOICE, "PLACEHOLDER_VOICE", MessageType.VOICE),
+    (EVENT_UNSUPPORTED, "PLACEHOLDER_UNSUPPORTED", MessageType.TEXT),
+    ("something.new", "PLACEHOLDER_UNSUPPORTED", MessageType.TEXT),
+])
+def test_handle_update_placeholders(event_name, expected_text, expected_type):
+    adapter, _ = make_adapter()
+    event = _dispatch(adapter, _update(event_name=event_name, text="")).await_args.args[0]
+    assert event.text == getattr(zadapter, expected_text)
+    assert event.message_type is expected_type
