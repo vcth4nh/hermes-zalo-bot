@@ -457,3 +457,58 @@ def test_handle_update_placeholders(event_name, expected_text, expected_type):
     event = _dispatch(adapter, _update(event_name=event_name, text="")).await_args.args[0]
     assert event.text == getattr(zadapter, expected_text)
     assert event.message_type is expected_type
+
+
+# -- env enablement and standalone send ------------------------------------
+
+def test_env_enablement_none_without_token(monkeypatch):
+    monkeypatch.delenv("ZALO_BOT_TOKEN", raising=False)
+    assert zadapter._env_enablement() is None
+
+
+def test_env_enablement_seeds_extra_and_home_channel(monkeypatch):
+    for _key, env, _default in zadapter.SETTINGS:
+        monkeypatch.delenv(env, raising=False)
+    monkeypatch.setenv("ZALO_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ZALO_MODE", "webhook")
+    monkeypatch.setenv("ZALO_HOME_CHANNEL", "u1")
+    monkeypatch.setenv("ZALO_HOME_CHANNEL_NAME", "Me")
+    seed = zadapter._env_enablement()
+    assert seed["token"] == TOKEN and seed["mode"] == "webhook"
+    assert seed["home_channel"] == {"chat_id": "u1", "name": "Me"}
+    assert "webhook_url" not in seed
+
+
+def test_env_enablement_home_channel_name_defaults_to_id(monkeypatch):
+    monkeypatch.setenv("ZALO_BOT_TOKEN", TOKEN)
+    monkeypatch.setenv("ZALO_HOME_CHANNEL", "u1")
+    monkeypatch.delenv("ZALO_HOME_CHANNEL_NAME", raising=False)
+    assert zadapter._env_enablement()["home_channel"] == {"chat_id": "u1", "name": "u1"}
+
+
+def test_register_wires_env_enablement_and_standalone_send(registered_platform):
+    kwargs = registered_platform.kwargs
+    assert kwargs["env_enablement_fn"] is zadapter._env_enablement
+    assert kwargs["standalone_sender_fn"] is zadapter._standalone_send
+    assert kwargs["cron_deliver_env_var"] == "ZALO_HOME_CHANNEL"
+
+
+def test_standalone_send_success(monkeypatch):
+    api = FakeApi(send_results=["cron-1"])
+    monkeypatch.setattr(zadapter, "ZaloBotApi", lambda token, **kw: api)
+    pconfig = PlatformConfig(enabled=True, extra={"token": TOKEN})
+    result = _run(zadapter._standalone_send(pconfig, "u1", "report", media_files=["/tmp/x.png"]))
+    assert result == {"success": True, "platform": "zalo", "chat_id": "u1", "message_id": "cron-1"}
+    assert api.calls == [("send_message", "u1", "report", "markdown")]
+    assert api.closed
+
+
+def test_standalone_send_errors(monkeypatch):
+    monkeypatch.delenv("ZALO_BOT_TOKEN", raising=False)
+    missing = _run(zadapter._standalone_send(PlatformConfig(enabled=True, extra={}), "u1", "x"))
+    assert "ZALO_BOT_TOKEN" in missing["error"]
+
+    api = FakeApi(send_results=[ZaloApiError("sendMessage", 500, "down")])
+    monkeypatch.setattr(zadapter, "ZaloBotApi", lambda token, **kw: api)
+    failed = _run(zadapter._standalone_send(PlatformConfig(enabled=True, extra={"token": TOKEN}), "u1", "x"))
+    assert "down" in failed["error"] and api.closed

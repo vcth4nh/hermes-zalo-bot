@@ -338,6 +338,44 @@ def is_connected(config) -> bool:
     return validate_config(config)
 
 
+def _env_enablement() -> Optional[dict]:
+    """Seed ``PlatformConfig.extra`` from env when ZALO_BOT_TOKEN is set.
+
+    Runs during gateway config load, before adapter construction, so ``hermes status`` and cron
+    see an env-only setup. The special ``home_channel`` key becomes a ``HomeChannel`` on the config.
+    """
+    seed: dict = {}
+    for key, env, _default in SETTINGS:
+        value = str(get_scoped_secret(env, "") or "").strip()
+        if value:
+            seed[key] = value
+    if "token" not in seed:
+        return None
+    home = str(get_scoped_secret("ZALO_HOME_CHANNEL", "") or "").strip()
+    if home:
+        name = str(get_scoped_secret("ZALO_HOME_CHANNEL_NAME", "") or "").strip() or home
+        seed["home_channel"] = {"chat_id": home, "name": name}
+    return seed
+
+
+async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
+                           media_files: Optional[list] = None, force_document: bool = False) -> dict:
+    """Out-of-process delivery for cron and ``hermes send`` when no gateway adapter is live."""
+    token = _setting(getattr(pconfig, "extra", None) or {}, "token", "ZALO_BOT_TOKEN")
+    if not token:
+        return {"error": "ZALO_BOT_TOKEN is not set"}
+    if media_files:
+        logger.info("[zalo] standalone send ignores %d media file(s): Zalo needs public URLs", len(media_files))
+    api = ZaloBotApi(token, timeout=20.0)
+    try:
+        message_id = await _send_text(api, str(chat_id), message)
+    except ZaloApiError as exc:
+        return {"error": str(exc)}
+    finally:
+        await api.close()
+    return {"success": True, "platform": PLATFORM_NAME, "chat_id": str(chat_id), "message_id": message_id}
+
+
 def register(ctx) -> None:
     """Plugin entry point: register the Zalo platform with the Hermes gateway."""
     ctx.register_platform(
@@ -349,6 +387,9 @@ def register(ctx) -> None:
         is_connected=is_connected,
         required_env=["ZALO_BOT_TOKEN"],
         install_hint="pip install aiohttp   # webhook mode only; polling needs nothing extra",
+        env_enablement_fn=_env_enablement,
+        cron_deliver_env_var="ZALO_HOME_CHANNEL",
+        standalone_sender_fn=_standalone_send,
         allowed_users_env="ZALO_ALLOWED_USERS",
         allow_all_env="ZALO_ALLOW_ALL_USERS",
         max_message_length=TEXT_LIMIT,
