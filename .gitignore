@@ -1,0 +1,12 @@
+# superpowers working docs (specs, plans)
+docs/superpowers/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# secrets
+.env
+*.env
