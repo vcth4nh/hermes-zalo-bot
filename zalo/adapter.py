@@ -231,22 +231,32 @@ class ZaloAdapter(BasePlatformAdapter):
             self._set_fatal_error(
                 "webhook_config", "webhook mode needs ZALO_WEBHOOK_URL and ZALO_WEBHOOK_SECRET", retryable=False)
             return False
+        if not self._webhook_url.lower().startswith("https://"):
+            self._set_fatal_error("webhook_config", "ZALO_WEBHOOK_URL must be an https:// URL", retryable=False)
+            return False
         try:
             from aiohttp import web
         except ImportError:
             self._set_fatal_error("missing_dep", "webhook mode needs aiohttp: pip install aiohttp", retryable=False)
             return False
-        app = web.Application(client_max_size=WEBHOOK_MAX_BODY)
-        app.router.add_post(self._webhook_path(), self._handle_webhook)
-        app.router.add_get("/health", self._handle_health)
-        runner = web.AppRunner(app)
-        await runner.setup()
+        runner = None
         try:
+            app = web.Application(client_max_size=WEBHOOK_MAX_BODY)
+            app.router.add_post(self._webhook_path(), self._handle_webhook)
+            app.router.add_get("/health", self._handle_health)
+            runner = web.AppRunner(app)
+            await runner.setup()
             await web.TCPSite(runner, self._webhook_host, self._webhook_port).start()
         except OSError as exc:
-            await runner.cleanup()
+            if runner is not None:
+                await runner.cleanup()
             self._set_fatal_error(
                 "bind_failed", f"cannot bind {self._webhook_host}:{self._webhook_port}: {exc}", retryable=True)
+            return False
+        except Exception as exc:
+            if runner is not None:
+                await runner.cleanup()
+            self._set_fatal_error("webhook_start_failed", f"cannot start webhook server: {exc}", retryable=False)
             return False
         self._web_runner = runner
         try:

@@ -518,8 +518,15 @@ def test_standalone_send_errors(monkeypatch):
 
 import httpx  # noqa: E402
 
-aiohttp_web = pytest.importorskip("aiohttp.web", reason="aiohttp is needed for webhook tests")
-from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
+try:
+    from aiohttp import web as aiohttp_web
+    from aiohttp.test_utils import TestClient, TestServer
+    AIOHTTP_AVAILABLE = True
+except ImportError:  # pragma: no cover - exercised only in aiohttp-free installs
+    aiohttp_web = TestClient = TestServer = None
+    AIOHTTP_AVAILABLE = False
+
+needs_aiohttp = pytest.mark.skipif(not AIOHTTP_AVAILABLE, reason="aiohttp is needed for webhook tests")
 
 WEBHOOK_EXTRA = {
     "mode": "webhook", "webhook_url": "https://example.com/zalo/webhook",
@@ -544,6 +551,7 @@ def _webhook_client(adapter):
     return TestClient(TestServer(app))
 
 
+@needs_aiohttp
 def test_connect_webhook_requires_url_and_secret():
     adapter, api = make_adapter({"mode": "webhook", "webhook_url": "", "webhook_secret": ""})
     assert _run(adapter.connect()) is False
@@ -551,6 +559,17 @@ def test_connect_webhook_requires_url_and_secret():
     assert api.closed and adapter._api is None
 
 
+@needs_aiohttp
+def test_connect_webhook_rejects_non_https_url():
+    adapter, api = make_adapter({
+        "mode": "webhook", "webhook_url": "example.com/zalo/webhook", "webhook_secret": "s3cr3t-token",
+    })
+    assert _run(adapter.connect()) is False
+    assert adapter._fatal_error_code == "webhook_config"
+    assert api.closed and adapter._web_runner is None
+
+
+@needs_aiohttp
 def test_connect_webhook_registers_and_serves_health():
     adapter, api = make_adapter(WEBHOOK_EXTRA)
 
@@ -568,6 +587,7 @@ def test_connect_webhook_registers_and_serves_health():
     assert adapter._web_runner is None and adapter._poll_task is None and api.closed
 
 
+@needs_aiohttp
 def test_connect_webhook_register_failure_stops_server():
     api = FakeApi()
 
@@ -581,6 +601,15 @@ def test_connect_webhook_register_failure_stops_server():
     assert adapter._web_runner is None and api.closed
 
 
+@needs_aiohttp
+def test_connect_webhook_start_failure_is_fatal_not_raised():
+    adapter, api = make_adapter({**WEBHOOK_EXTRA, "webhook_port": 99999})
+    assert _run(adapter.connect()) is False
+    assert adapter._fatal_error_code == "webhook_start_failed"
+    assert adapter._web_runner is None and api.closed
+
+
+@needs_aiohttp
 def test_webhook_path_from_url_or_default():
     adapter, _ = make_adapter({"webhook_url": "https://h.example/hooks/zalo"})
     assert adapter._webhook_path() == "/hooks/zalo"
@@ -588,6 +617,7 @@ def test_webhook_path_from_url_or_default():
     assert bare._webhook_path() == "/zalo/webhook"
 
 
+@needs_aiohttp
 def test_webhook_rejects_bad_secret_and_bad_json():
     adapter, _ = make_adapter(WEBHOOK_EXTRA)
 
@@ -602,6 +632,7 @@ def test_webhook_rejects_bad_secret_and_bad_json():
     adapter.handle_message.assert_not_awaited()
 
 
+@needs_aiohttp
 def test_webhook_accepts_and_dispatches():
     adapter, _ = make_adapter(WEBHOOK_EXTRA)
 
@@ -617,6 +648,7 @@ def test_webhook_accepts_and_dispatches():
     assert adapter.handle_message.await_args.args[0].text == "hi"
 
 
+@needs_aiohttp
 def test_webhook_ignores_payload_without_message():
     adapter, _ = make_adapter(WEBHOOK_EXTRA)
 
