@@ -156,17 +156,17 @@ class ZaloBotApi:
         try:
             response = await self._client.post(self.url(method), json=params or {}, timeout=read_timeout or self._timeout)
         except httpx.TimeoutException as exc:
-            raise ZaloApiError(method, 408, "request timeout") from exc
+            raise ZaloApiError(method, 408, self._redact("request timeout")) from exc
         except httpx.HTTPError as exc:
             raise ZaloApiError(method, 0, self._redact(str(exc))) from exc
         try:
             payload = response.json()
         except ValueError:
-            raise ZaloApiError(method, response.status_code, self._redact(response.text[:200])) from None
+            raise ZaloApiError(method, response.status_code, self._redact(response.text)[:200]) from None
         if not isinstance(payload, dict) or not payload.get("ok"):
             code = payload.get("error_code") if isinstance(payload, dict) else None
             description = payload.get("description") if isinstance(payload, dict) else None
-            raise ZaloApiError(method, int(code or response.status_code or 0), self._redact(str(description or payload)[:200]))
+            raise ZaloApiError(method, int(code or response.status_code or 0), self._redact(str(description or payload))[:200])
         return payload.get("result")
 
     async def get_me(self) -> dict:

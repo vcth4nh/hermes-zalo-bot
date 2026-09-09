@@ -203,6 +203,14 @@ def test_call_redacts_token_from_errors():
     assert "<TOKEN>" in str(info.value)
 
 
+def test_call_redacts_before_truncating():
+    description = "x" * 193 + TOKEN
+    with pytest.raises(ZaloApiError) as info:
+        _run(_api(Recorder(err(400, description))).call("getMe"))
+    assert TOKEN not in str(info.value)
+    assert "<TOKEN>" in str(info.value)
+
+
 def test_get_me_returns_result_dict():
     assert _run(_api(Recorder(ok({"id": "42", "display_name": "Bot"}))).get_me()) == {"id": "42", "display_name": "Bot"}
 
