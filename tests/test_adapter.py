@@ -257,10 +257,13 @@ def test_poll_loop_401_sets_fatal_and_stops():
     adapter, _ = make_adapter(api=api)
     adapter._api = api
     adapter._handle_update = AsyncMock()
+    handler = AsyncMock()
+    adapter.set_fatal_error_handler(handler)
     adapter._running = True
     _run(adapter._poll_loop())
     assert adapter._fatal_error_code == "bad_token" and adapter._running is False
     adapter._handle_update.assert_not_awaited()
+    handler.assert_awaited_once_with(adapter)
 
 
 def test_poll_loop_backs_off_on_errors(monkeypatch):

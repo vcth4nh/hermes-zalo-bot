@@ -171,6 +171,7 @@ class ZaloAdapter(BasePlatformAdapter):
             except ZaloApiError as exc:
                 if exc.code == 401:
                     self._set_fatal_error("bad_token", "Zalo rejected the bot token (401)", retryable=False)
+                    await self._notify_fatal_error()
                     return
                 delay = MAX_BACKOFF_SECONDS if exc.code == 429 else backoff
                 logger.warning("[%s] getUpdates failed: %s; retry in %.0fs", self.name, exc, delay)
