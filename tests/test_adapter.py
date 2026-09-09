@@ -512,3 +512,118 @@ def test_standalone_send_errors(monkeypatch):
     monkeypatch.setattr(zadapter, "ZaloBotApi", lambda token, **kw: api)
     failed = _run(zadapter._standalone_send(PlatformConfig(enabled=True, extra={"token": TOKEN}), "u1", "x"))
     assert "down" in failed["error"] and api.closed
+
+
+# -- webhook mode -----------------------------------------------------------
+
+import httpx  # noqa: E402
+
+aiohttp_web = pytest.importorskip("aiohttp.web", reason="aiohttp is needed for webhook tests")
+from aiohttp.test_utils import TestClient, TestServer  # noqa: E402
+
+WEBHOOK_EXTRA = {
+    "mode": "webhook", "webhook_url": "https://example.com/zalo/webhook",
+    "webhook_secret": "s3cr3t-token", "webhook_port": 0,  # port 0 = any free port
+}
+WEBHOOK_PAYLOAD = {
+    "ok": True,
+    "result": {
+        "event_name": EVENT_TEXT,
+        "message": {
+            "message_id": "w1", "text": "hi",
+            "from": {"id": "u1", "display_name": "Alice"}, "chat": {"id": "u1", "chat_type": "PRIVATE"},
+        },
+    },
+}
+SECRET_HEADERS = {"X-Bot-Api-Secret-Token": "s3cr3t-token"}
+
+
+def _webhook_client(adapter):
+    app = aiohttp_web.Application()
+    app.router.add_post("/zalo/webhook", adapter._handle_webhook)
+    return TestClient(TestServer(app))
+
+
+def test_connect_webhook_requires_url_and_secret():
+    adapter, api = make_adapter({"mode": "webhook", "webhook_url": "", "webhook_secret": ""})
+    assert _run(adapter.connect()) is False
+    assert adapter._fatal_error_code == "webhook_config"
+    assert api.closed and adapter._api is None
+
+
+def test_connect_webhook_registers_and_serves_health():
+    adapter, api = make_adapter(WEBHOOK_EXTRA)
+
+    async def scenario():
+        assert await adapter.connect() is True
+        host, port = adapter._web_runner.addresses[0][:2]
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"http://{host}:{port}/health")
+        assert response.status_code == 200 and response.text == "ok"
+        await adapter.disconnect()
+
+    _run(scenario())
+    assert ("set_webhook", "https://example.com/zalo/webhook", "s3cr3t-token") in api.calls
+    assert ("get_updates", 30) not in api.calls
+    assert adapter._web_runner is None and adapter._poll_task is None and api.closed
+
+
+def test_connect_webhook_register_failure_stops_server():
+    api = FakeApi()
+
+    async def failing(url, secret_token):
+        raise ZaloApiError("setWebhook", 400, "bad url")
+
+    api.set_webhook = failing
+    adapter, _ = make_adapter(WEBHOOK_EXTRA, api=api)
+    assert _run(adapter.connect()) is False
+    assert adapter._fatal_error_code == "webhook_register_failed"
+    assert adapter._web_runner is None and api.closed
+
+
+def test_webhook_path_from_url_or_default():
+    adapter, _ = make_adapter({"webhook_url": "https://h.example/hooks/zalo"})
+    assert adapter._webhook_path() == "/hooks/zalo"
+    bare, _ = make_adapter({"webhook_url": "https://h.example"})
+    assert bare._webhook_path() == "/zalo/webhook"
+
+
+def test_webhook_rejects_bad_secret_and_bad_json():
+    adapter, _ = make_adapter(WEBHOOK_EXTRA)
+
+    async def scenario():
+        async with _webhook_client(adapter) as client:
+            wrong = await client.post("/zalo/webhook", json=WEBHOOK_PAYLOAD, headers={"X-Bot-Api-Secret-Token": "wrong"})
+            missing = await client.post("/zalo/webhook", json=WEBHOOK_PAYLOAD)
+            broken = await client.post("/zalo/webhook", data=b"{not json", headers=SECRET_HEADERS)
+            return wrong.status, missing.status, broken.status
+
+    assert _run(scenario()) == (403, 403, 400)
+    adapter.handle_message.assert_not_awaited()
+
+
+def test_webhook_accepts_and_dispatches():
+    adapter, _ = make_adapter(WEBHOOK_EXTRA)
+
+    async def scenario():
+        async with _webhook_client(adapter) as client:
+            response = await client.post("/zalo/webhook", json=WEBHOOK_PAYLOAD, headers=SECRET_HEADERS)
+            assert response.status == 200
+            if adapter._tasks:
+                await asyncio.gather(*adapter._tasks)
+
+    _run(scenario())
+    adapter.handle_message.assert_awaited_once()
+    assert adapter.handle_message.await_args.args[0].text == "hi"
+
+
+def test_webhook_ignores_payload_without_message():
+    adapter, _ = make_adapter(WEBHOOK_EXTRA)
+
+    async def scenario():
+        async with _webhook_client(adapter) as client:
+            response = await client.post("/zalo/webhook", json={"ok": True, "result": {}}, headers=SECRET_HEADERS)
+            return response.status
+
+    assert _run(scenario()) == 200
+    adapter.handle_message.assert_not_awaited()

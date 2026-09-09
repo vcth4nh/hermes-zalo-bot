@@ -7,8 +7,10 @@ Receive: long-poll ``getUpdates`` (default) or an aiohttp webhook server. Send: 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from typing import Any, Dict, Optional, Set
+from urllib.parse import urlparse
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret
@@ -17,7 +19,7 @@ from gateway.platforms.event import MessageEvent, MessageType
 
 from .api import (
     EVENT_IMAGE, EVENT_STICKER, EVENT_TEXT, EVENT_VOICE, TEXT_LIMIT,
-    ZaloApiError, ZaloBotApi, ZaloUpdate, chunk_text, redact_token,
+    ZaloApiError, ZaloBotApi, ZaloUpdate, chunk_text, parse_update, redact_token,
 )
 from .inbound import SeenIds, strip_mention
 
@@ -35,6 +37,9 @@ DEFAULT_POLL_TIMEOUT = 30
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8790
 MAX_BACKOFF_SECONDS = 30.0
+DEFAULT_WEBHOOK_PATH = "/zalo/webhook"
+SECRET_HEADER = "X-Bot-Api-Secret-Token"
+WEBHOOK_MAX_BODY = 1024 * 1024  # bytes
 
 # (extra key, env var, default). config.yaml ``platforms.zalo.extra.<key>`` wins over the env var.
 SETTINGS = (
@@ -217,6 +222,77 @@ class ZaloAdapter(BasePlatformAdapter):
             except Exception:
                 logger.debug("[%s] webhook server cleanup failed", self.name, exc_info=True)
             self._web_runner = None
+
+    # -- webhook mode -----------------------------------------------------------
+
+    async def _start_webhook(self) -> bool:
+        """Bind the aiohttp server and register the public URL with Zalo. Sets a fatal error on failure."""
+        if not self._webhook_url or not self._webhook_secret:
+            self._set_fatal_error(
+                "webhook_config", "webhook mode needs ZALO_WEBHOOK_URL and ZALO_WEBHOOK_SECRET", retryable=False)
+            return False
+        try:
+            from aiohttp import web
+        except ImportError:
+            self._set_fatal_error("missing_dep", "webhook mode needs aiohttp: pip install aiohttp", retryable=False)
+            return False
+        app = web.Application(client_max_size=WEBHOOK_MAX_BODY)
+        app.router.add_post(self._webhook_path(), self._handle_webhook)
+        app.router.add_get("/health", self._handle_health)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        try:
+            await web.TCPSite(runner, self._webhook_host, self._webhook_port).start()
+        except OSError as exc:
+            await runner.cleanup()
+            self._set_fatal_error(
+                "bind_failed", f"cannot bind {self._webhook_host}:{self._webhook_port}: {exc}", retryable=True)
+            return False
+        self._web_runner = runner
+        try:
+            await self._api.set_webhook(self._webhook_url, self._webhook_secret)
+        except ZaloApiError as exc:
+            await self._stop_webhook()
+            self._set_fatal_error("webhook_register_failed", str(exc), retryable=True)
+            return False
+        logger.info("[%s] webhook %s registered; listening on %s:%s%s", self.name, self._webhook_url,
+                    self._webhook_host, self._webhook_port, self._webhook_path())
+        return True
+
+    def _webhook_path(self) -> str:
+        return urlparse(self._webhook_url).path or DEFAULT_WEBHOOK_PATH
+
+    async def _handle_health(self, request):
+        from aiohttp import web
+
+        return web.Response(text="ok")
+
+    async def _handle_webhook(self, request):
+        """Check the secret, parse the update, acknowledge at once, and dispatch in the background."""
+        from aiohttp import web
+
+        provided = request.headers.get(SECRET_HEADER, "")
+        if not hmac.compare_digest(provided.encode(), self._webhook_secret.encode()):
+            logger.warning("[%s] webhook call rejected: bad secret", self.name)
+            return web.Response(status=403, text="forbidden")
+        try:
+            payload = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json")
+        update = parse_update(payload)
+        if update is None:
+            logger.debug("[%s] webhook payload without a message ignored", self.name)
+        else:
+            task = asyncio.create_task(self._dispatch_webhook_update(update))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
+        return web.Response(status=200, text="ok")
+
+    async def _dispatch_webhook_update(self, update: ZaloUpdate) -> None:
+        try:
+            await self._handle_update(update)
+        except Exception:
+            logger.exception("[%s] failed to handle webhook message %s", self.name, update.message_id)
 
     async def _close_api(self) -> None:
         if self._api is not None:
