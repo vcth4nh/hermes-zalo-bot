@@ -156,7 +156,7 @@ class ZaloBotApi:
         try:
             response = await self._client.post(self.url(method), json=params or {}, timeout=read_timeout or self._timeout)
         except httpx.TimeoutException as exc:
-            raise ZaloApiError(method, 408, self._redact("request timeout")) from exc
+            raise ZaloApiError(method, 408, self._redact("request timed out")) from exc
         except httpx.HTTPError as exc:
             raise ZaloApiError(method, 0, self._redact(str(exc))) from exc
         try:

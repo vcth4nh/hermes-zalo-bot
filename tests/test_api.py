@@ -193,6 +193,7 @@ def test_call_maps_timeout_to_408_and_transport_errors_to_0():
     with pytest.raises(ZaloApiError) as transport:
         _run(_api(Recorder(httpx.ConnectError("refused"))).call("getMe"))
     assert timeout.value.code == 408
+    assert "timed out" in str(timeout.value)
     assert transport.value.code == 0
 
 

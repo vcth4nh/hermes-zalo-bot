@@ -37,6 +37,7 @@ DEFAULT_POLL_TIMEOUT = 30
 DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8790
 MAX_BACKOFF_SECONDS = 30.0
+PHOTO_DOWNLOAD_TIMEOUT = 20.0  # seconds
 DEFAULT_WEBHOOK_PATH = "/zalo/webhook"
 SECRET_HEADER = "X-Bot-Api-Secret-Token"
 WEBHOOK_MAX_BODY = 1024 * 1024  # bytes
@@ -105,6 +106,7 @@ class ZaloAdapter(BasePlatformAdapter):
     """Zalo Bot adapter: long-poll ``getUpdates`` or a webhook in; ``sendMessage`` out."""
 
     MAX_MESSAGE_LENGTH = TEXT_LIMIT  # Hermes core chunks replies at this length
+    splits_long_messages = True  # send() chunks natively; cron delivery keeps the full payload
 
     def __init__(self, config: PlatformConfig):
         super().__init__(config=config, platform=Platform(PLATFORM_NAME))
@@ -112,7 +114,7 @@ class ZaloAdapter(BasePlatformAdapter):
         values = {key: _setting(extra, key, env, default) for key, env, default in SETTINGS}
         self._token = values["token"]
         self._mode = values["mode"].lower()
-        self._poll_timeout = _int(values["poll_timeout"], DEFAULT_POLL_TIMEOUT)
+        self._poll_timeout = max(1, _int(values["poll_timeout"], DEFAULT_POLL_TIMEOUT))
         self._webhook_url = values["webhook_url"]
         self._webhook_secret = values["webhook_secret"]
         self._webhook_host = values["webhook_host"]
@@ -234,6 +236,9 @@ class ZaloAdapter(BasePlatformAdapter):
         if not self._webhook_url.lower().startswith("https://"):
             self._set_fatal_error("webhook_config", "ZALO_WEBHOOK_URL must be an https:// URL", retryable=False)
             return False
+        if not (8 <= len(self._webhook_secret) <= 256):
+            self._set_fatal_error("webhook_config", "ZALO_WEBHOOK_SECRET must be 8 to 256 characters", retryable=False)
+            return False
         try:
             from aiohttp import web
         except ImportError:
@@ -263,7 +268,7 @@ class ZaloAdapter(BasePlatformAdapter):
             await self._api.set_webhook(self._webhook_url, self._webhook_secret)
         except ZaloApiError as exc:
             await self._stop_webhook()
-            self._set_fatal_error("webhook_register_failed", str(exc), retryable=True)
+            self._set_fatal_error("webhook_register_failed", str(exc), retryable=(exc.code != 400))
             return False
         logger.info("[%s] webhook %s registered; listening on %s:%s%s", self.name, self._webhook_url,
                     self._webhook_host, self._webhook_port, self._webhook_path())
@@ -355,7 +360,7 @@ class ZaloAdapter(BasePlatformAdapter):
         if update.event_name == EVENT_IMAGE:
             caption = strip_mention(update.text, self._bot_display_name)
             try:
-                path = await cache_image_from_url(update.photo_url or "")
+                path = await asyncio.wait_for(cache_image_from_url(update.photo_url or ""), timeout=PHOTO_DOWNLOAD_TIMEOUT)
             except Exception as exc:
                 logger.warning("[%s] photo download failed: %s", self.name, exc)
                 text = f"{caption}\n{PLACEHOLDER_PHOTO_FAILED}" if caption else PLACEHOLDER_PHOTO_FAILED
@@ -380,7 +385,7 @@ class ZaloAdapter(BasePlatformAdapter):
             message_id = await _send_text(self._api, str(chat_id), content)
         except ZaloApiError as exc:
             logger.warning("[%s] sendMessage failed: %s", self.name, exc)
-            retryable = exc.code in (0, 408, 429) or exc.code >= 500
+            retryable = exc.code in (0, 429) or exc.code >= 500
             return SendResult(success=False, error=str(exc), retryable=retryable)
         return SendResult(success=True, message_id=message_id or None)
 
@@ -428,15 +433,14 @@ def _env_enablement() -> Optional[dict]:
     """Seed ``PlatformConfig.extra`` from env when ZALO_BOT_TOKEN is set.
 
     Runs during gateway config load, before adapter construction, so ``hermes status`` and cron
-    see an env-only setup. The special ``home_channel`` key becomes a ``HomeChannel`` on the config.
+    see an env-only setup. Only the token and the home channel are seeded: core merges this dict
+    OVER the YAML ``extra``, and every other setting is read by the adapter itself with YAML
+    precedence (see ``_setting``). The special ``home_channel`` key becomes a ``HomeChannel``.
     """
-    seed: dict = {}
-    for key, env, _default in SETTINGS:
-        value = str(get_scoped_secret(env, "") or "").strip()
-        if value:
-            seed[key] = value
-    if "token" not in seed:
+    token = str(get_scoped_secret("ZALO_BOT_TOKEN", "") or "").strip()
+    if not token:
         return None
+    seed: dict = {"token": token}
     home = str(get_scoped_secret("ZALO_HOME_CHANNEL", "") or "").strip()
     if home:
         name = str(get_scoped_secret("ZALO_HOME_CHANNEL_NAME", "") or "").strip() or home
@@ -472,7 +476,7 @@ def register(ctx) -> None:
         validate_config=validate_config,
         is_connected=is_connected,
         required_env=["ZALO_BOT_TOKEN"],
-        install_hint="pip install aiohttp   # webhook mode only; polling needs nothing extra",
+        install_hint="pip install httpx   # polling needs only httpx; webhook mode also needs aiohttp",
         env_enablement_fn=_env_enablement,
         cron_deliver_env_var="ZALO_HOME_CHANNEL",
         standalone_sender_fn=_standalone_send,

@@ -133,6 +133,7 @@ def test_register_builds_expected_entry(registered_platform):
     assert kwargs["validate_config"] is zadapter.validate_config
     assert kwargs["is_connected"] is zadapter.is_connected
     assert "2000" in kwargs["platform_hint"]
+    assert kwargs["install_hint"].startswith("pip install httpx")
     built = entry.adapter_factory(PlatformConfig(enabled=True, extra={"token": TOKEN}))
     assert isinstance(built, zadapter.ZaloAdapter)
 
@@ -165,11 +166,17 @@ def test_settings_defaults(monkeypatch):
     assert (adapter._webhook_host, adapter._webhook_port) == ("127.0.0.1", 8790)
     assert adapter._allowed_groups == set()
     assert adapter.MAX_MESSAGE_LENGTH == 2000
+    assert adapter.splits_long_messages is True
 
 
 def test_allowed_groups_csv():
     adapter, _ = make_adapter({"allowed_groups": " g1, g2 ,,"})
     assert adapter._allowed_groups == {"g1", "g2"}
+
+
+def test_poll_timeout_is_clamped_to_one_second():
+    assert make_adapter({"poll_timeout": 0})[0]._poll_timeout == 1
+    assert make_adapter({"poll_timeout": -5})[0]._poll_timeout == 1
 
 
 # -- connect / disconnect (polling) -----------------------------------------
@@ -325,6 +332,14 @@ def test_send_reports_failure_and_retryability():
     assert result.success is False and "down" in result.error and result.retryable is True
 
 
+def test_send_timeout_is_not_retryable():
+    api = FakeApi(send_results=[ZaloApiError("sendMessage", 408, "request timed out")])
+    adapter, _ = make_adapter(api=api)
+    adapter._api = api
+    result = _run(adapter.send("u1", "hi"))
+    assert result.success is False and result.retryable is False
+
+
 def test_send_empty_is_noop_and_unconnected_fails():
     adapter, api = make_adapter()
     assert _run(adapter.send("u1", "   ")).success is True
@@ -446,6 +461,20 @@ def test_handle_update_photo_download_failure_becomes_placeholder(monkeypatch):
     assert event.media_urls == [] and event.message_type is MessageType.TEXT
 
 
+def test_handle_update_photo_download_timeout_becomes_placeholder(monkeypatch):
+    async def slow_cache(url):
+        await asyncio.sleep(1)
+        return "/cache/img.jpg"
+
+    monkeypatch.setattr(zadapter, "PHOTO_DOWNLOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(zadapter, "cache_image_from_url", slow_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_IMAGE, text="", photo_url="https://cdn/a.jpg")
+    event = _dispatch(adapter, update).await_args.args[0]
+    assert event.text == zadapter.PLACEHOLDER_PHOTO_FAILED
+    assert event.media_urls == []
+
+
 @pytest.mark.parametrize("event_name, expected_text, expected_type", [
     (EVENT_STICKER, "PLACEHOLDER_STICKER", MessageType.STICKER),
     (EVENT_VOICE, "PLACEHOLDER_VOICE", MessageType.VOICE),
@@ -466,7 +495,7 @@ def test_env_enablement_none_without_token(monkeypatch):
     assert zadapter._env_enablement() is None
 
 
-def test_env_enablement_seeds_extra_and_home_channel(monkeypatch):
+def test_env_enablement_seeds_only_token_and_home_channel(monkeypatch):
     for _key, env, _default in zadapter.SETTINGS:
         monkeypatch.delenv(env, raising=False)
     monkeypatch.setenv("ZALO_BOT_TOKEN", TOKEN)
@@ -474,9 +503,7 @@ def test_env_enablement_seeds_extra_and_home_channel(monkeypatch):
     monkeypatch.setenv("ZALO_HOME_CHANNEL", "u1")
     monkeypatch.setenv("ZALO_HOME_CHANNEL_NAME", "Me")
     seed = zadapter._env_enablement()
-    assert seed["token"] == TOKEN and seed["mode"] == "webhook"
-    assert seed["home_channel"] == {"chat_id": "u1", "name": "Me"}
-    assert "webhook_url" not in seed
+    assert seed == {"token": TOKEN, "home_channel": {"chat_id": "u1", "name": "Me"}}
 
 
 def test_env_enablement_home_channel_name_defaults_to_id(monkeypatch):
@@ -551,7 +578,6 @@ def _webhook_client(adapter):
     return TestClient(TestServer(app))
 
 
-@needs_aiohttp
 def test_connect_webhook_requires_url_and_secret():
     adapter, api = make_adapter({"mode": "webhook", "webhook_url": "", "webhook_secret": ""})
     assert _run(adapter.connect()) is False
@@ -567,6 +593,15 @@ def test_connect_webhook_rejects_non_https_url():
     assert _run(adapter.connect()) is False
     assert adapter._fatal_error_code == "webhook_config"
     assert api.closed and adapter._web_runner is None
+
+
+@needs_aiohttp
+@pytest.mark.parametrize("secret", ["short", "x" * 300])
+def test_connect_webhook_rejects_bad_secret_length(secret):
+    adapter, api = make_adapter({**WEBHOOK_EXTRA, "webhook_secret": secret})
+    assert _run(adapter.connect()) is False
+    assert adapter._fatal_error_code == "webhook_config"
+    assert adapter._web_runner is None and api.closed
 
 
 @needs_aiohttp
@@ -599,6 +634,7 @@ def test_connect_webhook_register_failure_stops_server():
     assert _run(adapter.connect()) is False
     assert adapter._fatal_error_code == "webhook_register_failed"
     assert adapter._web_runner is None and api.closed
+    assert adapter._fatal_error_retryable is False
 
 
 @needs_aiohttp
@@ -609,7 +645,6 @@ def test_connect_webhook_start_failure_is_fatal_not_raised():
     assert adapter._web_runner is None and api.closed
 
 
-@needs_aiohttp
 def test_webhook_path_from_url_or_default():
     adapter, _ = make_adapter({"webhook_url": "https://h.example/hooks/zalo"})
     assert adapter._webhook_path() == "/hooks/zalo"
