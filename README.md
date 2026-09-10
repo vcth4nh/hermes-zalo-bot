@@ -84,6 +84,10 @@ platforms:
     extra:
       mode: polling
       allowed_groups: "1234567890123456789"
+display:
+  platforms:
+    zalo:
+      streaming: false   # Zalo cannot edit sent messages; this stops Hermes' streaming consumer and its per-reply "possible duplicate send" warning
 ```
 
 ### Webhook mode
