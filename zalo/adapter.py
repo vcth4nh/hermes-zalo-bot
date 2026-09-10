@@ -82,6 +82,15 @@ def _int(value: str, default: int) -> int:
         return default
 
 
+def _message_keys(raw: Any) -> list:
+    """Sorted keys of the ``message`` dict inside a raw update (envelope or bare form), for diagnostics."""
+    if not isinstance(raw, dict):
+        return []
+    body = raw.get("result") if isinstance(raw.get("result"), dict) else raw
+    message = body.get("message") if isinstance(body.get("message"), dict) else {}
+    return sorted(message.keys())
+
+
 def _csv_set(value: str) -> Set[str]:
     return {item.strip() for item in (value or "").split(",") if item.strip()}
 
@@ -359,6 +368,11 @@ class ZaloAdapter(BasePlatformAdapter):
             return text, (MessageType.COMMAND if text.startswith("/") else MessageType.TEXT), []
         if update.event_name == EVENT_IMAGE:
             caption = strip_mention(update.text, self._bot_display_name)
+            if not update.photo_url:
+                logger.warning("[%s] image event has no photo URL; message keys: %s", self.name,
+                               _message_keys(update.raw))
+                text = f"{caption}\n{PLACEHOLDER_PHOTO_FAILED}" if caption else PLACEHOLDER_PHOTO_FAILED
+                return text, MessageType.TEXT, []
             try:
                 path = await asyncio.wait_for(cache_image_from_url(update.photo_url or ""), timeout=PHOTO_DOWNLOAD_TIMEOUT)
             except Exception as exc:

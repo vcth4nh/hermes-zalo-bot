@@ -104,6 +104,14 @@ def test_parse_update_voice_and_sticker_fields():
     assert sticker.sticker == "s42"
 
 
+def test_parse_update_reads_photo_url_key_and_keeps_photo_fallback():
+    base = {"from": {"id": "u"}, "chat": {"id": "u"}}
+    real = parse_update({"event_name": EVENT_IMAGE, "message": {**base, "photo_url": "https://cdn/real.jpg"}})
+    documented = parse_update({"event_name": EVENT_IMAGE, "message": {**base, "photo": "https://cdn/doc.jpg"}})
+    assert real.photo_url == "https://cdn/real.jpg"
+    assert documented.photo_url == "https://cdn/doc.jpg"
+
+
 def test_parse_update_coerces_ids_and_falls_back_user_name_to_id():
     u = parse_update({"message": {"from": {"id": 77}, "chat": {"id": 77}}})
     assert u.user_id == "77" and u.user_name == "77" and u.chat_id == "77"

@@ -461,6 +461,23 @@ def test_handle_update_photo_download_failure_becomes_placeholder(monkeypatch):
     assert event.media_urls == [] and event.message_type is MessageType.TEXT
 
 
+def test_handle_update_image_without_url_skips_download(monkeypatch, caplog):
+    calls = []
+
+    async def fake_cache(url):
+        calls.append(url)
+        return "/cache/img.jpg"
+
+    monkeypatch.setattr(zadapter, "cache_image_from_url", fake_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_IMAGE, text="", photo_url=None, raw={"message": {"photo_url": "", "chat": {}}})
+    with caplog.at_level("WARNING"):
+        event = _dispatch(adapter, update).await_args.args[0]
+    assert calls == []
+    assert event.text == zadapter.PLACEHOLDER_PHOTO_FAILED and event.media_urls == []
+    assert "no photo URL" in caplog.text and "photo_url" in caplog.text
+
+
 def test_handle_update_photo_download_timeout_becomes_placeholder(monkeypatch):
     async def slow_cache(url):
         await asyncio.sleep(1)

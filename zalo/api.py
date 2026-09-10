@@ -103,7 +103,7 @@ def parse_update(payload: Any) -> Optional[ZaloUpdate]:
         user_name=_opt_str(sender.get("display_name")) or user_id,
         is_bot=bool(sender.get("is_bot")),
         text=str(message.get("text") or message.get("caption") or ""),
-        photo_url=_opt_str(message.get("photo")),
+        photo_url=_opt_str(message.get("photo_url") or message.get("photo")),  # live payloads use photo_url; docs say photo
         voice_url=_opt_str(message.get("voice_url")),
         sticker=_opt_str(message.get("sticker")),
         date_ms=int(date) if isinstance(date, (int, float)) and not isinstance(date, bool) else None,
