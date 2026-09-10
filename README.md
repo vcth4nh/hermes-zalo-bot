@@ -11,7 +11,7 @@ Chat with your Hermes agent from Zalo direct messages and groups.
 
 ## Requirements
 
-- Hermes Agent 0.21 or newer.
+- Hermes Agent 0.21.x (verified on 0.21.1). The plugin uses Hermes' platform-adapter contract, so re-run the test suite after a Hermes upgrade.
 - A bot token from [Zalo Bot Creator](https://bot.zapps.me/docs/create-bot/) (format `numeric_id:secret`).
 
 ## Install
@@ -44,9 +44,19 @@ Set `ZALO_ALLOW_ALL_USERS=true` for a first run, send the bot a message, and rea
 `[zalo] message.text.received from user <id> in dm <id>`. Put that id in `ZALO_ALLOWED_USERS` and remove the allow-all flag.
 Alternatively run `ZALO_BOT_TOKEN=... python scripts/smoke_echo.py` without Hermes; it prints the sender id.
 
+### Access control
+
+Hermes core checks every sender. A sender listed in `ZALO_ALLOWED_USERS` (or any sender when
+`ZALO_ALLOW_ALL_USERS=true`) is answered. Anyone else receives a one-time pairing code that you approve
+with `hermes pairing approve zalo <code>`; set `platforms.zalo.extra.unauthorized_dm_behavior: ignore`
+in `config.yaml` to stay silent instead. In groups the same sender check applies, and `ZALO_ALLOWED_GROUPS`
+limits which groups are answered at all.
+
 ## Configuration
 
-Every setting is an env var or a key under `platforms.zalo.extra` in `~/.hermes/config.yaml`. The config file value wins.
+Every setting is an env var or a key under `platforms.zalo.extra` in `~/.hermes/config.yaml`. The config
+file value wins for every setting except the token and the home channel: set those in
+`~/.hermes/.env`, and if both places define them the `.env` value is used.
 
 | Env var | `extra` key | Default | Meaning |
 |---|---|---|---|
