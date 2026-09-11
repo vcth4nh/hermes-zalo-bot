@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms._shared import get_scoped_secret
-from gateway.platforms.base import BasePlatformAdapter, SendResult, cache_image_from_url
+from gateway.platforms.base import BasePlatformAdapter, SendResult, cache_audio_from_url, cache_image_from_url
 from gateway.platforms.event import MessageEvent, MessageType
 
 from .api import (
@@ -38,6 +38,7 @@ DEFAULT_WEBHOOK_HOST = "127.0.0.1"
 DEFAULT_WEBHOOK_PORT = 8790
 MAX_BACKOFF_SECONDS = 30.0
 PHOTO_DOWNLOAD_TIMEOUT = 20.0  # seconds
+VOICE_DOWNLOAD_TIMEOUT = 20.0  # seconds
 DEFAULT_WEBHOOK_PATH = "/zalo/webhook"
 SECRET_HEADER = "X-Bot-Api-Secret-Token"
 WEBHOOK_MAX_BODY = 1024 * 1024  # bytes
@@ -60,7 +61,7 @@ PLATFORM_HINT = (
 )
 
 PLACEHOLDER_STICKER = "[sticker]"
-PLACEHOLDER_VOICE = "[voice message — Zalo voice is not supported here, please send text]"
+PLACEHOLDER_VOICE_FAILED = "[Zalo voice message could not be downloaded]"
 PLACEHOLDER_UNSUPPORTED = "[Zalo could not deliver this message — please resend it as plain text]"
 PLACEHOLDER_PHOTO_FAILED = "[Zalo photo could not be downloaded]"
 
@@ -355,7 +356,7 @@ class ZaloAdapter(BasePlatformAdapter):
             raw_message=update.raw,
             message_id=update.message_id or None,
             media_urls=media_paths,
-            media_types=["image"] * len(media_paths),
+            media_types=["audio/aac" if message_type is MessageType.VOICE else "image/jpeg"] * len(media_paths),
         )
         logger.info("[%s] %s from user %s in %s %s", self.name, update.event_name or "message",
                     update.user_id, chat_type, update.chat_id)
@@ -383,7 +384,17 @@ class ZaloAdapter(BasePlatformAdapter):
         if update.event_name == EVENT_STICKER:
             return PLACEHOLDER_STICKER, MessageType.STICKER, []
         if update.event_name == EVENT_VOICE:
-            return PLACEHOLDER_VOICE, MessageType.VOICE, []
+            if not update.voice_url:
+                logger.warning("[%s] voice event has no voice URL; message keys: %s", self.name,
+                               _message_keys(update.raw))
+                return PLACEHOLDER_VOICE_FAILED, MessageType.TEXT, []
+            try:
+                path = await asyncio.wait_for(cache_audio_from_url(update.voice_url, ext=".aac"),
+                                              timeout=VOICE_DOWNLOAD_TIMEOUT)
+            except Exception as exc:
+                logger.warning("[%s] voice download failed: %s", self.name, exc)
+                return PLACEHOLDER_VOICE_FAILED, MessageType.TEXT, []
+            return "", MessageType.VOICE, [path]  # Hermes core transcribes audio/* media on VOICE events
         return PLACEHOLDER_UNSUPPORTED, MessageType.TEXT, []
 
     # -- outbound -------------------------------------------------------------
