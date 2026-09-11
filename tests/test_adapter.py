@@ -446,7 +446,7 @@ def test_handle_update_photo_downloads_to_cache(monkeypatch):
     event = _dispatch(adapter, update).await_args.args[0]
     assert seen["url"] == "https://cdn/a.jpg"
     assert event.message_type is MessageType.PHOTO and event.text == "look"
-    assert event.media_urls == ["/cache/img.jpg"] and event.media_types == ["image"]
+    assert event.media_urls == ["/cache/img.jpg"] and event.media_types == ["image/jpeg"]
 
 
 def test_handle_update_photo_download_failure_becomes_placeholder(monkeypatch):

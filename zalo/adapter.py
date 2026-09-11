@@ -356,7 +356,7 @@ class ZaloAdapter(BasePlatformAdapter):
             raw_message=update.raw,
             message_id=update.message_id or None,
             media_urls=media_paths,
-            media_types=["audio/aac" if message_type is MessageType.VOICE else "image"] * len(media_paths),
+            media_types=["audio/aac" if message_type is MessageType.VOICE else "image/jpeg"] * len(media_paths),
         )
         logger.info("[%s] %s from user %s in %s %s", self.name, update.event_name or "message",
                     update.user_id, chat_type, update.chat_id)
