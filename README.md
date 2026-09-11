@@ -107,11 +107,26 @@ The adapter binds `ZALO_WEBHOOK_HOST:ZALO_WEBHOOK_PORT`, serves `GET /health`, a
 
 Add the bot to a group through its share link (the group leader confirms). Zalo delivers only messages that @mention the bot or reply to one of its messages, so the adapter needs no mention gate. `ZALO_ALLOWED_GROUPS` limits which groups are answered; senders still need to pass `ZALO_ALLOWED_USERS` or the allow-all flag. Group support is marked "internal beta" by Zalo.
 
+### Voice messages
+
+The adapter downloads each voice clip (AAC) into the Hermes audio cache and hands it to the core as audio. Hermes transcribes it with its configured speech-to-text (STT) provider, echoes the transcript, and answers. STT is a Hermes setting, not a plugin setting:
+
+```yaml
+stt:
+  enabled: true          # default
+  provider: local        # local (faster-whisper, needs ffmpeg), groq, openai, mistral, xai, elevenlabs, deepinfra
+  language: vi           # optional Whisper language hint; unset lets the provider detect the language
+  local:
+    model: small         # default "base"; "small" or "medium" transcribes Vietnamese better
+```
+
+Cloud providers read their key from the usual variable (`GROQ_API_KEY`, `OPENAI_API_KEY`, ...). An OpenAI-compatible LLM proxy without an `/audio/transcriptions` route cannot transcribe; use `local` or a dedicated STT key. When no provider works, the agent receives a note with the cached file path instead of a transcript. A clip that cannot be downloaded arrives as `[Zalo voice message could not be downloaded]`.
+
 ### Limits
 
 - Messages are capped at 2000 characters; Hermes splits longer replies.
 - Replies are sent with `parse_mode: markdown` and retried as plain text if Zalo rejects the markup.
-- Incoming photos are downloaded so the agent can see them. Voice messages and stickers arrive as a placeholder note.
+- Incoming photos are downloaded so the agent can see them. Incoming voice messages are downloaded and transcribed by Hermes (see Voice messages). Stickers arrive as a placeholder note.
 - Outgoing images need a public URL (`sendPhoto`). Local files cannot be sent.
 - No threads, edits, reactions, or reply quoting: the Bot API has no such parameters.
 
