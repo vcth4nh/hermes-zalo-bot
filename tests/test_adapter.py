@@ -529,12 +529,12 @@ def test_handle_update_voice_without_url_skips_download(monkeypatch, caplog):
 
     monkeypatch.setattr(zadapter, "cache_audio_from_url", fake_cache)
     adapter, _ = make_adapter()
-    update = _update(event_name=EVENT_VOICE, text="", voice_url=None, raw={"message": {"voice": "", "chat": {}}})
+    update = _update(event_name=EVENT_VOICE, text="", voice_url=None, raw={"message": {"voice_url": "", "chat": {}}})
     with caplog.at_level("WARNING"):
         event = _dispatch(adapter, update).await_args.args[0]
     assert calls == []
     assert event.text == zadapter.PLACEHOLDER_VOICE_FAILED and event.media_urls == []
-    assert "no voice URL" in caplog.text and "voice" in caplog.text
+    assert "no voice URL" in caplog.text and "voice_url" in caplog.text
 
 
 def test_handle_update_voice_download_timeout_becomes_placeholder(monkeypatch):
