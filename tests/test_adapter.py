@@ -492,9 +492,67 @@ def test_handle_update_photo_download_timeout_becomes_placeholder(monkeypatch):
     assert event.media_urls == []
 
 
+def test_handle_update_voice_downloads_clip_as_audio(monkeypatch):
+    seen = {}
+
+    async def fake_cache(url, ext=".ogg"):
+        seen["url"], seen["ext"] = url, ext
+        return "/cache/voice.aac"
+
+    monkeypatch.setattr(zadapter, "cache_audio_from_url", fake_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_VOICE, text="", voice_url="https://cdn/v.aac")
+    event = _dispatch(adapter, update).await_args.args[0]
+    assert seen == {"url": "https://cdn/v.aac", "ext": ".aac"}
+    assert event.message_type is MessageType.VOICE and event.text == ""
+    assert event.media_urls == ["/cache/voice.aac"] and event.media_types == ["audio/aac"]
+
+
+def test_handle_update_voice_download_failure_becomes_placeholder(monkeypatch):
+    async def fake_cache(url, ext=".ogg"):
+        raise ValueError("blocked")
+
+    monkeypatch.setattr(zadapter, "cache_audio_from_url", fake_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_VOICE, text="", voice_url="https://cdn/v.aac")
+    event = _dispatch(adapter, update).await_args.args[0]
+    assert event.text == zadapter.PLACEHOLDER_VOICE_FAILED
+    assert event.media_urls == [] and event.message_type is MessageType.TEXT
+
+
+def test_handle_update_voice_without_url_skips_download(monkeypatch, caplog):
+    calls = []
+
+    async def fake_cache(url, ext=".ogg"):
+        calls.append(url)
+        return "/cache/voice.aac"
+
+    monkeypatch.setattr(zadapter, "cache_audio_from_url", fake_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_VOICE, text="", voice_url=None, raw={"message": {"voice": "", "chat": {}}})
+    with caplog.at_level("WARNING"):
+        event = _dispatch(adapter, update).await_args.args[0]
+    assert calls == []
+    assert event.text == zadapter.PLACEHOLDER_VOICE_FAILED and event.media_urls == []
+    assert "no voice URL" in caplog.text and "voice" in caplog.text
+
+
+def test_handle_update_voice_download_timeout_becomes_placeholder(monkeypatch):
+    async def slow_cache(url, ext=".ogg"):
+        await asyncio.sleep(1)
+        return "/cache/voice.aac"
+
+    monkeypatch.setattr(zadapter, "VOICE_DOWNLOAD_TIMEOUT", 0.05)
+    monkeypatch.setattr(zadapter, "cache_audio_from_url", slow_cache)
+    adapter, _ = make_adapter()
+    update = _update(event_name=EVENT_VOICE, text="", voice_url="https://cdn/v.aac")
+    event = _dispatch(adapter, update).await_args.args[0]
+    assert event.text == zadapter.PLACEHOLDER_VOICE_FAILED
+    assert event.media_urls == []
+
+
 @pytest.mark.parametrize("event_name, expected_text, expected_type", [
     (EVENT_STICKER, "PLACEHOLDER_STICKER", MessageType.STICKER),
-    (EVENT_VOICE, "PLACEHOLDER_VOICE", MessageType.VOICE),
     (EVENT_UNSUPPORTED, "PLACEHOLDER_UNSUPPORTED", MessageType.TEXT),
     ("something.new", "PLACEHOLDER_UNSUPPORTED", MessageType.TEXT),
 ])
